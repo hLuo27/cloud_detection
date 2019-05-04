@@ -1,9 +1,9 @@
 # cloud_detection
 
-- [Final Report](.pdf)
-- [Raw Word Document](.doc)
-- [R Code](.Rmd)
-- [CV Generic Function](.R)
+- [Final Report](report.pdf)
+- [Raw Word Document](report_doc.docx)
+- [R Code](code.Rmd)
+- [CV Generic Function](CVgeneric.R)
 - [Data](/image_data)
 
 To reproduce the report, first download the Rmd file as well as the images, located in the [image_data folder](/image_data). Put the folder and the Rmd file in the same directory, and then open the Rmd file. If working with the same data, simply knit the file to a pdf to replicate the results in this report.

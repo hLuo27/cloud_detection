@@ -1,0 +1,778 @@
+---
+title: 'Stat 154 Project 2: Cloud Data'
+author: "Salim Damerdji (3033310620) and Hubert Luo (3031834014)"
+output:
+  word_document: default
+  html_document: default
+---
+
+## 1. Data Collection and Exploration
+
+### Summary
+
+Because studying cloud coverage is key to climate science, Shi et al. wanted to create cloud detection algorithms that process images of the Arctic. The images comes from the Multiangle Imaging SpectroRadiometer (MISR) imager, which uses 9 cameras, each at a different angle and spectral band. Shi et al.'s data set came from ten 16-day-long MISR orbits over the Arctic. The data was collected from April 28 to September 19, 2002. The orbits covered a path (viz. 26) that covered a variety of terrain, including permanent ice, mountains, and glaciers. For each orbit, there were 57 data units with about 7.1 million pixels with 36 radiation measurements for each pixel. Each pixel represents a square region of side length 275 meters. Experts labelled pixels that had clouds, but only for the 71.5% of pixels for which the experts were highly confident in.
+
+The study broke with previous literature by searching for cloud-free surfaces, not cloud-covered surfaces, to create an enhanced linear correlation matching (ELCM) algorithm. Using the three features of the linear correlation of radiation measurements from different MISR view directions (CORR), the standard deviation of MISR nadir red radiation measurements within a small region (SDAn), and the normalized difference angular index (NDAI), the study predicted probabilities of cloudiness to present a more accurate picture of cloud coverage in the Arctic and its effect on changes in the climate induced by increasing amounts of carbon dioxide.
+
+The study's upshot is in creating a cutting-edge cloud classifier with 92% accuracy, 100% coverage, and the speed to work in real time. The study can also impact future Earth science work by demonstrating that even simple models with QDA and just three features can distinguish cloud-free areas.
+
+### Summary of Data
+
+```{r echo=F}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+```
+
+```{r library}
+library(caret)
+library(MASS)
+library(class)
+library(corrplot)
+library(GGally)
+library(rpart)
+library(plotROC)
+library(tidyverse)
+library(ROCit)
+library(randomForest)
+```
+
+```{r read}
+# Read txt files for each image and create a column called image that says which image the datapoints are representing and a column called num_pixels taht contains the number of pixels in the image
+image1 = read.table('image_data/image1.txt')
+image1$image = 1
+image1$num_pixels = nrow(image1)
+
+image2 = read.table('image_data/image2.txt')
+image2$image = 2
+image2$num_pixels = nrow(image2)
+
+image3 = read.table('image_data/image3.txt')
+image3$image = 3
+image3$num_pixels = nrow(image3)
+```
+
+```{r bind}
+# Bind the 3 image dataframes into 1 dataframe. The 12th column, image, represents which image the datapoint represents, and the 13th column, num_pixels, is the number of pixels in that image
+name_of_features  = c('y','x','label','NDAI','SD','CORR','DF','CF','BF','AF','AN','image','num_pixels')
+images = rbind(image1,image2,image3)
+colnames(images) <- name_of_features
+colnames(image1) <- name_of_features
+colnames(image2) <- name_of_features
+colnames(image3) <- name_of_features
+```
+
+The table below contains the proportion of pixels from all three images that are labeled as either cloud-free (-1), cloudy (1), or unlabeled (0). See the table after for the proportion broken down by each image. 
+
+```{r table}
+table(images$label)/nrow(images)
+```
+
+The table below has the average feature value for each label and image. It is noteworthy that the average feature values are all much higher for cloudy pixels than it they are for cloud-free pixels. In addition, it has the proportion of pixels in each image with a specific label. Image 1 was mostly cloud-free, while image 2 was split relatively evenly between cloudy and cloud-free. Image 3 was mostly unlabeled, meaning there was more ambiguity in the image with regards to cloud coverage.
+
+```{r img3}
+images %>% group_by(label, image) %>% summarise(mean_NDAI = mean(NDAI), mean_SD = mean(SD), mean_CORR = mean(CORR), prop_label = n()/mean(num_pixels))
+```
+
+The plot below shows the expert labels with the colour of the region corresponding to the expert label. 
+
+```{r expert}
+tmp <- images
+unique(tmp['label'])
+tmp[tmp['label'] == 1, 'label'] <- 'cloudy'
+tmp[tmp['label'] == 0, 'label'] <- 'unknown'
+tmp[tmp['label'] == -1, 'label'] <- 'clear'
+
+unique(tmp['label'])
+ggplot(tmp) +
+  geom_point(aes(x = x, y = y, colour = label)) +
+  facet_grid(~image) +
+  ggtitle('Expert Labels for Each Image by Coordinates') +
+  labs(x = 'x coordinate', y = 'y coordinate') +
+  scale_color_manual(values=c("steelblue", "white","grey"))
+```
+
+From the plot above, there are clear areas where the pixels were predominanty of one label - for example, in the bottom left of image 1, it is almost entirely pixels with label 1, corresponding to a cloudy region. However, there is no observable overall pattern of the labels in accordance with the x and y coordinates other than the formation of distinct groupings of pixels with a common label. Therefore, an iid assumption for the samples is not justified for this dataset.
+
+## Exploratory Data Analysis
+
+Quantiatively, there is a positive correlation between SD and the NDAI, with a correlation of 0.631. There is a weaker positive correlation between that of CORR and NDAI at 0.403 and a even weakter positive correlation between CORR and SD of 0.297. Visually, this is clear from the pairplot between NDAI and SD, where in general as the NDAI increases, so does the SD - the dots in the plot form a roughly triangular shape below the diagonal.
+
+```{r ggpairs}
+ggpairs(images[4:6], title = "Pairplot of Three Main Features")
+```
+
+Note that the 3 plots below only consist of pixels which had a label, i.e., excluding pixels with a label of 0. In general, there were a few noticable differences between the expert labels based on the features. Some of the situations indicative of cloudy areas included: high NDAI in conjunction with low SD; medium NDAI along with high CORR; and either high or low CORR (i.e., greater than 0.2 or less than 0). Situations indicative of cloud-free areas included: low values of both SD and NDAI and medium values of CORR (around 0.1-0.15). 
+
+```{r plot pairwise}
+labeled_images = images %>% filter(label != 0)
+
+ggplot(data = labeled_images) +
+  geom_point(aes(x = NDAI, y = SD, col = label), alpha = 0.5) +
+  ggtitle('NDAI and SD of Labeled Pixels')
+
+ggplot(data = labeled_images) +
+  geom_point(aes(x = NDAI, y = CORR, col = label), alpha = 0.5) +
+  ggtitle('NDAI and CORR of Labeled Pixels')
+
+ggplot(data = labeled_images) +
+  geom_point(aes(x = SD, y = CORR, col = label), alpha = 0.5) +
+  ggtitle('SD and CORR of Labeled Pixels')
+```
+
+## 2. Preperation
+### A - Data Split
+Here are two approaches.
+
+Option A: you could randomly assign 50% of units to the training set, 25% to the validation set, and 25% to the test set. That is 29 units for training, 14 for validation, and 14 for testing.
+
+Option B: you could randomly assign one image to the training set, the second to the validation set, and the third image to the test set.
+
+Both approaches take into account the fact that the data is not iid. Naively, we could randomly assign pixels to sets. But this permits two neighboring pixels to be split up, such that one is in the training set and the other in the test set. That would be a trivial test! By merely memorizing the label assigned to the neighboring pixel from the training set, our model could accurately predict the label for the pixel in the test set. But it wouldn't have learned anything, and we would be underestimating our true error. 
+
+Option B solves this problem because it will never split up two neighboring pixels: both will be in the training set, or both will be in the test set. 
+
+But this comes at a cost. Namely, you only get a third of your pixels to train with. Plus, you may get unlucky with which image is the test set. Perhaps the hardest image is in the test set, in which case you're overestimating your error. Or the opposite could happen and you would underestimate your error.
+
+Option A solves this problem but at a cost: namely, it may sometimes split up two neighboring pixels. But this should be fairly rare since it would only occur on the border of two units split between two sets. This small downside is outweighted by the larger disadvantages to option B. Now, we don't have units but we can make a work around: we will divy up each image into 10 by 10 rectangles, and randomly assign 50% to the training set, 25% to the validation set, and 25% to the test set.
+
+```{r by_unit}
+
+set.seed(0)
+# Im using a code where each cell is a 3-digit number. first digit is image. 
+# second digit is minimum x quantile. third digit is minimum y quantile.
+x_y_coords <- c(0:4,10:14,20:24,30:34,40:44)
+im_1_coords <-  100 + x_y_coords
+im_2_coords <- 200 + x_y_coords
+im_3_coords <- 300 + x_y_coords
+
+length(im_1_coords)
+im_x_y_coords <- sample(c(im_1_coords, im_2_coords, im_3_coords), 75)
+# empty df must have correct column names
+make_df <- function(start, end){
+  empty_df <- filter(images, x != x)
+  for (i in start:end){
+    im <- im_x_y_coords[i] %/% 100
+    x_min <- im_x_y_coords[i] %/% 10 %% 10
+    y_min <- im_x_y_coords[i] %% 10
+    if (x_min == 0 && y_min == 0){
+      empty_df <- rbind(empty_df, filter(images, image == im,
+                    x >= quantile(x, .2*x_min),
+                    x <= quantile(x, .2*(x_min+1)),
+                    y >= quantile(y, .2*y_min),
+                    y <= quantile(y, .2*(y_min+1))))
+    } else if (x_min == 0){
+      empty_df <- rbind(empty_df, filter(images, image == im,
+                    x >= quantile(x, .2*x_min),
+                    x <= quantile(x, .2*(x_min+1)),
+                    y > quantile(y, .2*y_min),
+                    y <= quantile(y, .2*(y_min+1))))
+    } else if (y_min == 0){
+      empty_df <- rbind(empty_df, filter(images, image == im,
+                    x > quantile(x, .2*x_min),
+                    x <= quantile(x, .2*(x_min+1)),
+                    y >= quantile(y, .2*y_min),
+                    y <= quantile(y, .2*(y_min+1))))
+    } else{
+      empty_df <- rbind(empty_df, filter(images, image == im,
+                    x > quantile(x, .2*x_min),
+                    x <= quantile(x, .2*(x_min+1)),
+                    y > quantile(y, .2*y_min),
+                    y <= quantile(y, .2*(y_min+1))))
+    }
+  }
+  return(empty_df)
+}
+train_a <- make_df(1, 38)
+valid_a <- make_df(39, 58)
+test_a <- make_df(59,75)
+
+im_train_1 <- inner_join(train_a, image1)
+im_valid_1<- inner_join(valid_a, image1)
+im_test_1<- inner_join(test_a, image1)
+
+ggplot() +
+  geom_point(aes(im_train_1$x,im_train_1$y), color = 'blue') +
+  geom_point(aes(im_valid_1$x,im_valid_1$y), color = 'red')  +
+  geom_point(aes(im_test_1$x,im_test_1$y), color = 'yellow')
+```
+
+```{r by_img}
+s <- sample(1:3, 3)
+train_b <- filter(images, image == s[1])
+valid_b <- filter(images, image == s[2])
+test_b  <- filter(images, image == s[3])
+```
+
+###b: (Baseline)
+
+```{r trivial classifier}
+nrow(filter(valid_a, label == -1))/nrow(valid_a)
+nrow(filter(test_a, label == -1))/nrow(test_a)
+```
+
+This will have a higher average accuracy if there are a lot of cloud free observations in the validation and test set.
+
+###c:  (First order importance) Assuming the expert labels as the truth, and without using fancy classification methods, suggest three of the "best" features, using quantitative and visual justification. Define your "best" feature criteria clearly. Only the relevant plots are necessary. Be sure to give this careful consideratidon, as it relates to subsequent problems.
+
+
+The three best features should explain the most variance in the response.
+```{r most_var}
+sub_train_a <- filter(train_a, label != 0)
+round(sort(cor(dplyr::select(sub_train_a,-x,-y,-num_pixels,-image))[1,]),3)
+```
+
+By this approach, NDAI, CORR and AN have three strongest correlation with the label. We also know NDAI correlates with CORR by .367. And NDAI correlates with AN by -.55. And AN correlates with CORR by -.65. There is a choice about whether to use AF or AN. They're approximately similar in correlation with label. But AF has a weaker correlation with CORR
+
+```{r}
+cor(sub_train_a)
+```
+
+```{r}
+
+tmp <- sample_n(train_a, 20000)
+tmp[tmp['label'] == 1, 'label'] <- 'cloudy'
+tmp[tmp['label'] == 0, 'label'] <- 'unknown'
+tmp[tmp['label'] == -1, 'label'] <- 'clear'
+
+sample <- tmp
+head(sample)
+af <- sample %>% select(NDAI, CORR, AF)
+sd <- sample %>% select(NDAI, CORR, SD)
+bf <- sample %>% select(NDAI, CORR, BF)
+
+pca_sample_af = prcomp(scale(af))
+pca_sample_sd = prcomp(scale(sd))
+pca_sample_bf = prcomp(scale(bf))
+# Create dataframe with all the eigenvalues from both datasets
+df1 <- data.frame(pca_sample_af$x) %>%
+  mutate(label = sample$label) %>%
+  filter(label != 'unknown')
+
+df2 <- data.frame(pca_sample_sd$x) %>%
+  mutate(label = sample$label)%>%
+  filter(label != 'unknown')
+
+df3 <- data.frame(pca_sample_bf$x) %>%
+  mutate(label = sample$label)%>%
+  filter(label != 'unknown')
+
+ggplot(df1) +
+  geom_point(aes(x=PC1, y=PC2, color=label), size = .2, alpha = .2) +
+  ggtitle('Separability with AF, CORR, NDAI. Projected onto PC components.')
+
+ggplot(df2) +
+  geom_point(aes(x=PC1, y=PC2, color=label), size = .2, alpha = .2) +
+  ggtitle('Separability with SD, CORR, NDAI. Projected onto PC components.')
+
+ggplot(df3) +
+  geom_point(aes(x=PC1, y=PC2, color=label), size = .2, alpha = .2) +
+  ggtitle('Separability with BF, CORR, NDAI. Projected onto PC components.')
+
+summary(pca_sample_af)
+summary(pca_sample_sd)
+summary(pca_sample_bf)
+
+```
+
+There seems to be a negligeable difference between using AN and AF for the third feature, since theyre so positively correlated.
+
+###d: Please remember to put it in your github folder in Section 5
+
+```{r crossvalidation}
+# Need to randomize rows of X_train and y_train beforehand!!
+CVgeneric <- function(classifier, X_train, y_train, k, loss_fn, knn_k = 3){
+  folds <- cut(seq(1,nrow(X_train)), breaks=k, labels=FALSE)
+  k_losses <- c()
+  for (i in 1:k){
+    # Training and validation sets for the kth fold
+    fold_train = X_train[which(folds != i), c('NDAI', 'SD', 'CORR', 'DF', 'CF','BF','AF','AN')]
+    fold_val = X_train[which(folds == i), c('NDAI', 'SD', 'CORR', 'DF', 'CF','BF','AF','AN')]
+    # y values for the kth fold
+    y_fold_train = y_train[which(folds != i)]
+    y_fold_val = y_train[which(folds == i)]
+    # Do this if a knn classifier
+    if("knn" == as.character(substitute(classifier))){
+      # First standardize the explanatory variables, then add the response variable back as a factor
+      knn_train = scale(fold_train) %>% as.data.frame() %>% mutate(label = as.factor(y_fold_train))
+      knn_val = scale(fold_val) %>% as.data.frame() %>% mutate(label = as.factor(y_fold_val))
+      # k value determined using basic elbow method in scree plot above
+      model = knn3(label~., data = knn_train, k = knn_k)
+      y_fold_predicted = predict(model, knn_val, type = "class")
+      k_losses <- c(k_losses, loss_fn(y_fold_predicted, y_fold_val))
+    }
+    # Otherwise, do this for decision tree
+    else if("rpart" == as.character(substitute(classifier))){
+      model = rpart(label~., data = fold_train %>% mutate(label = y_fold_train), method = "class")
+      y_fold_predicted = predict(model, fold_val, type = "class")
+      k_losses <- c(k_losses, loss_fn(y_fold_predicted, y_fold_val))
+    }
+    # Otherwise this is lda, qda, or logistic regression model
+    else{
+      # Fit model for the kth fold 
+      model = classifier(label ~., data = fold_train %>% mutate(label = y_fold_train))
+      # If it's a lda or qda model, need to access the class of model predict output. Note class(glm model) = "glm" "lm" so we can't just do class == "lda"
+      if("lda" %in% class(model) | "qda" %in% class(model)){
+        y_fold_predicted = predict(model, fold_val)$class 
+        k_losses <- c(k_losses, loss_fn(y_fold_predicted, y_fold_val))
+      }
+      # Otherwise, this is logistic model
+      else{
+        y_fold_predicted = as.numeric(predict(model, fold_val) > 0)
+        y_fold_predicted[y_fold_predicted == 0] = -1
+        k_losses <- c(k_losses, loss_fn(y_fold_predicted, y_fold_val))
+      }
+    }
+  }
+  return(c(k_fold_cv_loss = mean(k_losses), fold_losses = k_losses))
+}
+
+# Loss function that takes in two arrays, pred and true, and returns the prediction accuracy
+accuracy_metric <- function(pred, true){
+  return(mean(pred == true))
+}
+```
+
+## 3. Modelling
+
+Logistic regression, LDA, QDA, k-nearest neighbour, and decision tree models were evaluated using 5-fold cross validation. The number of folds $k = 5$ was chosen to have samples of the data large enough to be representative of the overall dataset (lower bias than smaller values of $k$) while also not having as much variance as larger values of $k$. 
+
+```{r modelling}
+# Shuffle order of the datasets to apply CV function
+set.seed(42)
+train_a = train_a[sample(nrow(train_a)),]
+valid_a = valid_a[sample(nrow(valid_a)),]
+train_b = train_b[sample(nrow(train_b)),]
+valid_b = valid_b[sample(nrow(valid_b)),]
+
+# Combine training and validation datasets, but remove unlabeled data and only keep explanatory variables + response variable
+combined_a = rbind(train_a, valid_a) %>% filter(label != 0) %>% dplyr::select('NDAI', 'SD', 'CORR', 'DF', 'CF','BF','AF','AN','label')
+combined_b = rbind(train_b, valid_b) %>% filter(label != 0) %>% dplyr::select('NDAI', 'SD', 'CORR', 'DF', 'CF','BF','AF','AN','label')
+```
+
+Note to determine the best value of the hyperparameter $k$ for k-nearest neighbours, the combined dataset was used to determine a reasonable value for $k = 3$ using the basic elbow method.
+
+```{r pca}
+pca_combined_a = prcomp(scale(combined_a))
+pca_combined_b = prcomp(scale(combined_b))
+```
+
+For knn, we let the number of neighbours k=3. We show later in Part 4a that this parameter is close to optimal. The table of accuracies on the left demonstrates that the k-nearest neighbours model performed best on the data from split A, while LDA, Logistic, and QDA all performed similarly well on the data from split B. However, most of the accuracies were within a similar range, i.e., between 83% and 95%, and differences between model accuracies were relatively minor for data from the same split. In addition, the average cross-validation accuracies were generally higher than those of the testing accuracies. 
+
+Folds 1, 2, and 3 for split B had significantly higher accuracies than folds 4 and 5, perhaps indicative of issues in the original split of data using the second method. Other potential issues with the results from split B are that if the data has a high number of clouds, we may be disproportionately rewarding models with high recall and not punishing low precision enough. The opposite problem occurs if the test image has few clouds, and thus generally split A would be advisable to split B due to the potential issues inherent in split B. 
+
+```{r avg_cv}
+cv_accuracies = data.frame(Model = numeric(), Average_CV_Accuracy = numeric(), Fold_1_Accuracy = numeric(), Fold_2_Accuracy = numeric(), Fold_3_Accuracy = numeric(), Fold_4_Accuracy = numeric(), Fold_5_Accuracy = numeric())
+
+cv_accuracies[1,] = c('Logistic', CVgeneric(glm, combined_a %>% dplyr::select(-label), combined_a$label, 5, accuracy_metric))
+cv_accuracies[2,] = c('LDA', CVgeneric(lda, combined_a %>% dplyr::select(-label), combined_a$label, 5, accuracy_metric))
+cv_accuracies[3,] = c('QDA', CVgeneric(qda, combined_a %>% dplyr::select(-label), combined_a$label, 5, accuracy_metric))
+# Warning: this knn line takes about 3 minutes to run
+cv_accuracies[4,] = c('KNN', CVgeneric(knn, combined_a %>% dplyr::select(-label), combined_a$label, 5, accuracy_metric))
+cv_accuracies[5,] = c('Decision Tree', CVgeneric(rpart, combined_a %>% dplyr::select(-label), combined_a$label, 5, accuracy_metric))
+
+cv_accuracies[6,] = c('Logistic', CVgeneric(glm, combined_b %>% dplyr::select(-label), combined_b$label, 5, accuracy_metric))
+cv_accuracies[7,] = c('LDA', CVgeneric(lda, combined_b %>% dplyr::select(-label), combined_b$label, 5, accuracy_metric))
+cv_accuracies[8,] = c('QDA', CVgeneric(qda, combined_b %>% dplyr::select(-label), combined_b$label, 5, accuracy_metric))
+# Warning: this knn line takes about 3 minutes to run
+cv_accuracies[9,] = c('KNN', CVgeneric(knn, combined_b %>% dplyr::select(-label), combined_b$label, 5, accuracy_metric))
+cv_accuracies[10,] = c('Decision Tree', CVgeneric(rpart, combined_b %>% dplyr::select(-label), combined_b$label, 5, accuracy_metric))
+
+cv_accuracies$Split = c(rep('A',5),rep('B',5))
+```
+
+```{r}
+# Only keep relevant columns of testing datasets
+test_a = test_a %>% filter(label != 0) %>% dplyr::select('NDAI', 'SD', 'CORR', 'DF', 'CF','BF','AF','AN','label')
+test_b = test_b %>% filter(label != 0) %>% dplyr::select('NDAI', 'SD', 'CORR', 'DF', 'CF','BF','AF','AN','label')
+
+# Models and predictions for data from first split (Split A)
+logistic_a = glm(label ~., data = combined_a)
+pred_log_a = as.numeric(predict(logistic_a, test_a) > 0)
+pred_log_a[pred_log_a == 0] = -1
+
+lda_a = lda(label~., data = combined_a)
+pred_lda_a = predict(lda_a, test_a)$class 
+
+qda_a = qda(label~., data = combined_a)
+pred_qda_a = predict(qda_a, test_a)$class
+
+# First standardize the explanatory variables, then add the response variable back as a factor
+knn_train = scale(combined_a %>% dplyr::select(-label)) %>% as.data.frame() %>% mutate(label = as.factor(combined_a$label))
+knn_test = scale(test_a %>% dplyr::select(-label)) %>% as.data.frame() %>% mutate(label = as.factor(test_a$label))
+# k value determined using basic elbow method in scree plot above
+knn_a = knn3(label~., data = knn_train, k = 3)
+# This is really time-intensve so we first get a table of 2 columns with the probability in each column (so  we don't have to call this again for the ROC curves)
+prob_pred_knn_a = predict(knn_a, knn_test, type = "prob")
+# Then get predicted classes and convert to -1 and 1
+pred_knn_a = apply(prob_pred_knn_a, 1, which.max) - 1
+pred_knn_a[pred_knn_a == 0] = -1
+
+rpart_a = rpart(label~., data = combined_a, method = "class")
+pred_rpart_a = predict(rpart_a, test_a, type = "class")
+
+# Models and predictions for data from second split (Split B)
+logistic_b = glm(label ~., data = combined_b)
+pred_log_b = as.numeric(predict(logistic_b, test_b) > 0)
+pred_log_b[pred_log_b == 0] = -1
+
+lda_b = lda(label~., data = combined_b)
+pred_lda_b = predict(lda_b, test_b)$class 
+
+qda_b = qda(label~., data = combined_b)
+pred_qda_b = predict(qda_b, test_b)$class
+
+# First standardize the explanatory variables, then add the response variable back as a factor
+knn_train = scale(combined_b %>% dplyr::select(-label)) %>% as.data.frame() %>% mutate(label = as.factor(combined_b$label))
+knn_test = scale(test_b %>% dplyr::select(-label)) %>% as.data.frame() %>% mutate(label = as.factor(test_b$label))
+# k value determined using basic elbow method in scree plot above
+knn_b = knn3(label~., data = knn_train, k = 3)
+# This is really time-intensve so we first get a table of 2 columns with the probability in each column (so  we don't have to call this again for the ROC curves)
+prob_pred_knn_b = predict(knn_b, knn_test, type = "prob")
+# Then get predicted classes and convert to -1 and 1
+pred_knn_b = apply(prob_pred_knn_b, 1, which.max) - 1
+pred_knn_b[pred_knn_b == 0] = -1
+
+rpart_b = rpart(label~., data = combined_b, method = "class")
+pred_rpart_b = predict(rpart_b, test_b, type = "class")
+
+# Create dataframe with the test accuracies
+test_accuracies = data.frame(Model = rep(c('Logisitc','LDA','QDA','KNN','Decision Tree'),2), 
+                             Test_Accuracy = c(accuracy_metric(pred_log_a, test_a$label), accuracy_metric(pred_lda_a, test_a$label),
+                                               accuracy_metric(pred_qda_a, test_a$label), accuracy_metric(pred_knn_a, test_a$label),
+                                               accuracy_metric(pred_rpart_a, test_a$label), accuracy_metric(pred_log_b, test_b$label),
+                                               accuracy_metric(pred_lda_b, test_b$label), accuracy_metric(pred_qda_b, test_b$label),
+                                               accuracy_metric(pred_knn_b, test_b$label), accuracy_metric(pred_rpart_b, test_b$label)),
+                             Split = c(rep('A',5),rep('B',5)))
+```
+
+```{r}
+bind_cols(cv_accuracies, test_accuracies) %>% dplyr::select(c(1,8,10,2:7))
+
+write.csv(bind_cols(cv_accuracies, test_accuracies) %>% dplyr::select(c(1,8,10,2:7)), 'model_accuracies.csv')
+```
+
+The cutoff value varies depending on the specific model used. To calculate the optimal cutoff value, Youden's J statistic (True Positive Rate - False Positive Rate, equivalent to Precision + Recall - 1) was used. Youden's statistic was chosen as it balances the desire to maximize the true positive rate while also minimizing the false positive rate to estimate the informedness of a prediction. The optimal cutoff values are displayed in the table for both splits A and B, and the cutoff values are marked on the ROC curves as well for both splits A and B below. 
+
+```{r}
+# List of predicted labels for each model (length of 10)
+predicted_labels_by_model = list(pred_log_a, pred_lda_a, pred_qda_a, pred_knn_a, pred_rpart_a, pred_log_b, pred_lda_b, pred_qda_b, pred_knn_b, pred_rpart_b)
+```
+
+```{r}
+# This predicted_labels_a has the actual predicted label, i.e., length of 68,084 x 5
+predicted_probs_a = c(predict(logistic_a, test_a), predict(lda_a, test_a)$posterior[,2], predict(qda_a, test_a)$posterior[,2], prob_pred_knn_a[,2], predict(rpart_a, test_a, type = "prob")[,2])
+roc_df_a = data.frame(predicted = predicted_probs_a, actual = rep(test_a$label, 5), model = c(rep("Logistic",length(pred_log_a)), rep("LDA",length(pred_lda_a)), rep("QDA",length(pred_qda_a)), rep("KNN",length(pred_knn_a)), rep("Decision Tree",length(pred_rpart_a))))
+
+# Alternative ROC plots that are more time-consuming but nicer looking
+ROC_a_log = rocit(score = predict(logistic_a, test_a), class = test_a$label)
+ROC_a_lda = rocit(score = predict(lda_a, test_a)$posterior[,2], class = test_a$label)
+ROC_a_qda = rocit(score = predict(qda_a, test_a)$posterior[,2], class = test_a$label)
+ROC_a_knn = rocit(score = prob_pred_knn_a[,2], class = test_a$label)
+ROC_a_rpart = rocit(score = predict(rpart_a, test_a, type = "prob")[,2], class = test_a$label)
+
+cutoff_values_a = c(ROC_a_log$Cutoff[which.max(ROC_a_log$TPR - ROC_a_log$FPR)], ROC_a_lda$Cutoff[which.max(ROC_a_lda$TPR - ROC_a_lda$FPR)],
+                    ROC_a_qda$Cutoff[which.max(ROC_a_qda$TPR - ROC_a_qda$FPR)], ROC_a_knn$Cutoff[which.max(ROC_a_knn$TPR - ROC_a_knn$FPR)],
+                    ROC_a_rpart$Cutoff[which.max(ROC_a_rpart$TPR - ROC_a_rpart$FPR)])
+
+ggplot(roc_df_a) + 
+  geom_roc(aes(m = predicted, d = actual), cutoffs.at = cutoff_values_a, labelsize = 7) +
+  ggtitle("ROC Curves of Dataset using Split A") +
+  facet_wrap(~model) +
+  labs(x = "False Positive Rate", y = "True Positive Rate")
+
+# Alternative ROC plots that are more time-consuming but nicer looking
+# plot(ROC_a_log, main = "Logistic (Split A) ROC")
+# plot(ROC_a_lda, main = "LDA (Split A) ROC")
+# plot(ROC_a_qda, main = "QDA (Split A) ROC")
+# plot(ROC_a_knn, main = "KNN (Split A) ROC")
+# plot(ROC_a_rpart, main = "Decision Tree (Split A) ROC")
+```
+
+```{r}
+# This predicted_labels_b has the actual predicted label, i.e., length of 70,917 x 5
+predicted_probs_b = c(predict(logistic_b, test_b), predict(lda_b, test_b)$posterior[,2], predict(qda_b, test_b)$posterior[,2], prob_pred_knn_b[,2], predict(rpart_b, test_b, type = "prob")[,2])
+roc_df_b = data.frame(predicted = predicted_probs_b, actual = rep(test_b$label, 5), model = c(rep("Logistic",length(pred_log_b)), rep("LDA",length(pred_lda_b)), rep("QDA",length(pred_qda_b)), rep("KNN",length(pred_knn_b)), rep("Decision Tree",length(pred_rpart_b))))
+
+ROC_b_log = rocit(score = predict(logistic_b, test_b), class = test_b$label)
+ROC_b_lda = rocit(score = predict(lda_b, test_b)$posterior[,2], class = test_b$label)
+ROC_b_qda = rocit(score = predict(qda_b, test_b)$posterior[,2], class = test_b$label)
+ROC_b_knn = rocit(score = prob_pred_knn_b[,2], class = test_b$label)
+ROC_b_rpart = rocit(score = predict(rpart_b, test_b, type = "prob")[,2], class = test_b$label)
+
+cutoff_values_b = c(ROC_b_log$Cutoff[which.max(ROC_b_log$TPR - ROC_b_log$FPR)], ROC_b_lda$Cutoff[which.max(ROC_b_lda$TPR - ROC_b_lda$FPR)],
+                    ROC_b_qda$Cutoff[which.max(ROC_b_qda$TPR - ROC_b_qda$FPR)], as.numeric(names(table(ROC_b_knn$Cutoff)))[2],
+                    as.numeric(names(table(ROC_b_rpart$Cutoff)))[2])
+
+ggplot(roc_df_b) + 
+  geom_roc(aes(m = predicted, d = actual), cutoffs.at = cutoff_values_b, labelsize = 6, cutoff.labels = round(cutoff_values_b,2)) +
+  ggtitle("ROC Curves of Dataset using Split B") +
+  facet_wrap(~model) +
+  labs(x = "False Positive Rate", y = "True Positive Rate")
+
+# Alternative ROC plots that are more time-consuming but nicer looking
+# plot(ROC_b_log, main = "Logistic (Split B) ROC")
+# plot(ROC_b_lda, main = "LDA (Split B) ROC")
+# plot(ROC_b_qda, main = "QDA (Split B) ROC")
+# plot(ROC_b_knn, main = "KNN (Split B) ROC")
+# plot(ROC_b_rpart, main = "Decision Tree (Split B) ROC")
+```
+
+The table below contains additional performance metrics such as precision, recall, and Youden's J statistic. Test and Average CV accuracies were discussed earlier in this report. For split A, k-nearest neighbours had not only the highest test/average CV accuracies, but also the highest precision, recall, and Youden's statistic values, indicating it was the preferable model for split A out of all the ones examined. In general, split A resulted in higher recall than precision, indicating that these models are more sensitive, i.e., they do a better job of identifying the presence of a cloud. However, there were a relatively high number of false positives where the models using split A thought there were clouds when the area was actually cloud-free. 
+
+For split B, QDA had the highest precision out of the models examined but also the lowest recall, demonstrating that the model was frequently classifying areas as cloud-free even if they were cloudy. QDA had the lowest Youden's statistic out of the models for split B and is thus not a good choice for split B. On the other hand, the Logistic and LDA models both had relatively high Youden's statistics, although both were much lower than the Youden's statistic for the k-nearest neighbours model in split A. This indicated that for split B, logistic or LDA were relatively better - the differences in the metrics between these two models were marginal and it is unrealistic to definitively conclude that one model is better suited. For split B overall, the models generally had higher precision than recall, with the exception of the decision tree model, which meant they were more adept at minimizing the number of false positives when a cloud-free area was identified as cloudy at the cost of fewer instances of correctly identifying the presence of a cloud. 
+
+Comparing the results for splits A and B overall, it is clear that split A overall is preferable over split B and the k-nearest neighbours model especially is ideal as it has both high precision and recall, resulting in a high Youden's statistic. Although some models for split B such as Logistic and LDA had high precision, the recall was much lower relative to the models in Split A. Comparing their Youden's statistics, the models in split A and k-nearest neighbours especially for split A were preferable. Further discussion and support is provided in the next section below. 
+
+```{r}
+precision = numeric()
+recall = c()
+for(pred in predicted_labels_by_model[1:5]){
+  precision = c(precision, sum(pred == 1 & test_a$label == 1)/sum(pred == 1)) #TP/(TP + FP)
+  recall = c(recall, sum(pred == 1 & test_a$label == 1)/sum(test_a$label == 1)) #TP/(TP + FN)
+}
+for(pred in predicted_labels_by_model[6:10]){
+  precision = c(precision, sum(pred == 1 & test_b$label == 1)/sum(pred == 1)) #TP/(TP + FP)
+  recall = c(recall, sum(pred == 1 & test_b$label == 1)/sum(test_b$label == 1)) #TP/(TP + FN)
+}
+performance_metrics = bind_cols(cv_accuracies, test_accuracies) %>% dplyr::select(c(1,8,10,2)) %>% mutate(precision = precision, recall = recall) %>% mutate("Youden's Index" = precision + recall - 1)
+performance_metrics 
+write.csv(performance_metrics, 'model_performance_metrics.csv')
+```
+
+The table of performance metrics above contains additoinal metrics such as precision and recall. In general, split A results in higher recall than precision (with the excpetion of Quadratic Discriminant Analysis), indicating that these models are more sensitive, i.e., they do a better job of identifying the presence of a cloud. On the other hand, split B generaly resulted in higher precision than recall, with the exception of the decision tree model, which means they are more adept at minimizing the number of times a clear unit was identiied as cloudy. 
+
+## 4.
+
+We choose to evaluate our models based on split A. These models are trained on a training set that is 2.3x larger, so these models are better. Even though the models trained on split B score the same on their test set, these results are less reliable since Split B's test set is a single image, so there's no gaurantee of generalizability. This view is supported by the fact that split A yields models with a higher average cv accuracy.
+
+Within split A, it looks as though knn has the highest performance. Its test accuracy is 87% and its average cv accuracy is 95%.
+
+#### A - Diagnostics
+
+To combine our precision and recall, we can look at our f1 score:
+
+```{r}
+
+2 * (0.7856502 * 0.9318566) / (0.7856502 + 0.9318566)
+```
+This tells us the overall performance of our binary classifier in a way that equally weights precision and recall.
+
+We use CVgeneric to find an optimal k value.
+
+```{r}
+set.seed(0)
+small_a <- sample_n(combined_a, 20000)
+ks <- c(1,2,5,6,7,8,9,10,15,50,75,150)
+accuracy <- c()
+for (j in ks){
+  accuracy <- c(accuracy, CVgeneric(knn, small_a %>% select(-label), small_a$label, 5, accuracy_metric, j)[[1]])
+}
+
+df_k <- data.frame(ks, accuracy)
+df_k
+
+ggplot(df_k) +
+  geom_path(aes(x=ks,y=accuracy), color = 'steelblue') +
+  xlab("K in K-Nearest Neighbors") +
+  ylab("Avg Accuracy using Cross Validation")+
+  ggtitle("Split A: How the parameter K affects KNN Model's performance") +
+  expand_limits(y=.9)
+```
+Our cv results plateau between k=5 through k=10. This is indirect evidence that our model is robust to the specific parameter chosen. While a small k decreases bias and increases variance, it looks as though a relatively small k is near the optima. Let's use k=5 since it's less memory intensive. We yield a similar accuracy on the test set with k=5.
+
+Now I want to show that our model is stable.
+```{r}
+set.seed(123)
+small_a <- sample_n(combined_a, 10000)
+tiny_train_1 <- small_a[1:3000,]
+tiny_train_2 <- small_a[3001:6000,]
+tiny_train_3 <- small_a[6001:9000,]
+tiny_test <- small_a[9001:10000,]
+
+colnames(tiny_train_1)
+tiny_knn_1 = knn3(label~., data = scale(tiny_train_1[,-1]), k = 5)
+tiny_knn_2 = knn3(label~., data = scale(tiny_train_2[,-1]), k = 5)
+tiny_knn_3 = knn3(label~., data = scale(tiny_train_3[,-1]), k = 5)
+# This is really time-intensve so we first get a table of 2 columns with the probability in each column (so  we don't have to call this again for the ROC curves)
+prob_pred_knn_1 = predict(tiny_knn_1, tiny_test)
+prob_pred_knn_2 = predict(tiny_knn_2, tiny_test, type = "prob")
+prob_pred_knn_3 = predict(tiny_knn_3, tiny_test, type = "prob")
+# Then get predicted classes and convert to -1 and 1
+
+pred_knn_1 = apply(prob_pred_knn_1, 1, which.max) - 1
+pred_knn_2 = apply(prob_pred_knn_2, 1, which.max) - 1
+pred_knn_3 = apply(prob_pred_knn_3, 1, which.max) - 1
+
+
+df_bar <- data.frame(c('1 vs 2', '2 vs 3', '1 vs 3'),
+                     c(mean(pred_knn_1 == pred_knn_2),
+                       mean(pred_knn_2 == pred_knn_3),
+                       mean(pred_knn_1 == pred_knn_3)))
+colnames(df_bar) <- c('Training_Sets', 'Similarity')
+df_bar
+ggplot(df_bar) +
+  geom_col(aes(x=Training_Sets, y=Similarity), fill=c('light blue','steelblue','grey')) +
+  ggtitle('When the training set changes, how often do we predict the same label?') +
+  xlab("Pairwise comparison of three training sets") +
+  ylab('Percentage of predictions that are the same')
+
+```
+
+This evidence shows that even after using 3 different training sets of 1,000 samples, we make the same predictions roughly 96% of the time. Thus, our knn approach is robust and stable, despite changes in the training set. This is great! Furthermore, these are conservative estimates: using a larger sample should decrease instability further. We only used a training set of 1,000 samples, but we should have access to 160k samples if we train on the train and validation sets.
+
+#### B
+
+```{r}
+draw_test_correct <- function(img, i){
+
+  im_knn <- test_a %>%
+    mutate(pred = pred_knn_a) %>%
+    inner_join(img) %>%
+    mutate(correct = (label == pred))
+
+  print(ggplot(im_knn) +
+    geom_point(aes(x,y, color=correct)) +
+    ggtitle(paste0('Test set from image ', i)))
+}
+
+draw_test_correct(image1,'1')
+draw_test_correct(image2, '2')
+draw_test_correct(image3, '3')
+
+```
+
+Our errors seem largely concentrated near each other. For image 1, our errors are mostly in one contiguous region on the bottom. The same can be said for image 3. In addition there's an island on the left in image 3 that we fail to classify.
+
+```{r}
+im_test_3 <- inner_join(image3, test_a)
+ggplot(filter(im_test_3, x<150, x>90, y>180, y<275))+
+  geom_point(aes(x,y, color=label))
+
+# SD difference between mislabelledcluster on bottom of image 1
+# and SD of other pixels from that label on image 1
+quantile(x=filter(im_test_1, x<220, x>150, y<68, label == -1)$SD, probs = c(.25,.5,.75))
+quantile(x=filter(im_test_1, label == -1)$SD, probs = c(.25,.5,.75))
+
+# SD difference between mislabelledcluster on bottom of image 3
+# and SD of other pixels from that label on image 3
+quantile(x=filter(im_test_3, x<400, x>100, y<100, label == -1)$SD, probs = c(.25,.5,.75))
+quantile(x=filter(im_test_3, label == -1)$SD, probs = c(.25,.5,.75))
+
+# SD difference between mislabelledcluster on left of image 3
+# and SD of other pixels from that label on image 3
+quantile(x=filter(im_test_3, x<150, x>90, y>180, y<275, label == -1)$SD, probs = c(.25,.5,.75))
+quantile(x=filter(im_test_3, label == -1)$SD, probs = c(.25,.5,.75))
+```
+After doing some snooping on the poorly labelled area in image 1, it seems its mean SD is 18.3, while the mean SD for the label across the image is 3.5.  This is huge! The 25th percentile for the bad cluster is nearly 2x larger than the 75th percentile for the rest of the image's uncloudy regions.
+
+In fact, all three clusters we identified earlier as poorly labelled have a lot in common. They all should be labelled cloud-free. And they all have anomolous SD values. 
+
+### C
+
+In our view, a better classifier would be an ensemble of all the classifiers we've trained. To determine a label, we would look at the sum of probabilities of each pixel being cloudy or not cloudy, and which ever sum was larger, that would be the prediction. 
+
+Every model is going to have some deficiencies on certain locations. But our prior is that these deficiencies should be random, and thus, that they should cancel out when we take the average of a collection of models.
+
+A downside to this approach is that fitting values will take more time since you will have to run each model on each pixel. But this is only a scalar increase in complexity, which drops out asymptotically. Moreover, for climate change research, these values don't need to be recomputed in real time, so this extra computation is not prohibitively expensive.
+
+Our model does not depend on expert labels, so it should be fine, as long as we're not extrapolating too far outside of the realm of data seen in our training set. This a feature of knn, which only understands new data points in terms of the nearest old data. Based on our results, we expect at least an accuracy of 89%. This should be a conservative estimate, because we have yet to train our model on the entirety of the training set and validation set. However, our model underperforms at precision compared to recall, so we will do worse with data sets where there are few clouds.
+
+```{r random_forest_feature_importance}
+pred_knn_training_set = predict(knn_a, knn_train, type = "class")
+incorrect_train_a = combined_a[knn_train$label != pred_knn_training_set,]
+incorrect_train_a$label = as.factor(incorrect_train_a$label)
+rf_a = randomForest(label~., data = incorrect_train_a)
+importance_rf = importance(rf_a)
+
+plot(importance_rf)
+
+varImpPlot(rf_a, main = "Feature Importance")
+```
+
+### d
+
+Our f-1 score with split B is way worse:
+```{r}
+2 * (0.7508822 * 0.6652337) / (0.7508822 + 0.6652337)
+```
+
+```{r}
+set.seed(0)
+small_b <- sample_n(combined_b, 20000)
+ks <- c(1,2,5,6,7,8,9,10,15,50,75,150)
+accuracy <- c()
+for (j in ks){
+  accuracy <- c(accuracy, CVgeneric(knn, small_b %>% select(-label), small_b$label, 5, accuracy_metric, j)[[1]])
+}
+
+df_k <- data.frame(ks, accuracy)
+df_k
+
+ggplot(df_k) +
+  geom_path(aes(x=ks,y=accuracy), color = 'steelblue') +
+  xlab("K in K-Nearest Neighbors") +
+  ylab("Avg Accuracy using Cross Validation")+
+  ggtitle("How the parameter K affects KNN Model's performance") +
+  expand_limits(y=.9)
+```
+
+```{r}
+set.seed(123)
+small_b <- sample_n(combined_b, 10000)
+tiny_train_1 <- small_b[1:3000,]
+tiny_train_2 <- small_b[3001:6000,]
+tiny_train_3 <- small_b[6001:9000,]
+tiny_test <- small_b[9001:10000,]
+
+colnames(tiny_train_1)
+tiny_knn_1 = knn3(label~., data = scale(tiny_train_1[,-1]), k = 5)
+tiny_knn_2 = knn3(label~., data = scale(tiny_train_2[,-1]), k = 5)
+tiny_knn_3 = knn3(label~., data = scale(tiny_train_3[,-1]), k = 5)
+# This is really time-intensve so we first get a table of 2 columns with the probability in each column (so  we don't have to call this again for the ROC curves)
+prob_pred_knn_1 = predict(tiny_knn_1, tiny_test)
+prob_pred_knn_2 = predict(tiny_knn_2, tiny_test, type = "prob")
+prob_pred_knn_3 = predict(tiny_knn_3, tiny_test, type = "prob")
+# Then get predicted classes and convert to -1 and 1
+
+pred_knn_1 = apply(prob_pred_knn_1, 1, which.max) - 1
+pred_knn_2 = apply(prob_pred_knn_2, 1, which.max) - 1
+pred_knn_3 = apply(prob_pred_knn_3, 1, which.max) - 1
+
+df_bar <- data.frame(c('1 vs 2', '2 vs 3', '1 vs 3'),
+                     c(mean(pred_knn_1 == pred_knn_2),
+                       mean(pred_knn_2 == pred_knn_3),
+                       mean(pred_knn_1 == pred_knn_3)))
+colnames(df_bar) <- c('Training_Sets', 'Similarity')
+df_bar
+ggplot(df_bar) +
+  geom_col(aes(x=Training_Sets, y=Similarity), fill=c('light blue','steelblue','grey')) +
+  ggtitle('Split B: When the training set changes, how often do we predict the same label?') +
+  xlab("Pairwise comparison of three training sets") +
+  ylab('Percentage of predictions that are the same')
+
+```
+Our model is also way less stable. We only make the same predictions approximately 83-85% of the time when we use different training sets. 
+
+```{r}
+draw_test_correct_b <- function(img, i){
+
+  im_knn <- test_b %>%
+    mutate(pred = pred_knn_b) %>%
+    inner_join(img) %>%
+    mutate(correct = (label == pred))
+
+  print(ggplot(im_knn) +
+    geom_point(aes(x,y, color=correct)) +
+    ggtitle(paste0('Test set from image ', i)))
+}
+
+draw_test_correct(image1,'1')
+draw_test_correct(image2, '2')
+draw_test_correct(image3, '3')
+
+```
+
+We do get the same clusters of mislabelled points when we use the 2nd split. Thus, we still think an ensemble approach would be better no matter the split.
+
+### e
+
+In this section, we've shown that our knn model has .85 f1 score, that we have 95% accuracy when k=5, that our knn model gives stable predictions (approximately 95% of predictions are the same) even when trained on completely different training sets; and that our knn model is not hyper-sensitive to the parameter k. We've also discussed limitations of our model: it will underperform on less cloudy images, and on cloud-free regions with anomolous SD values. We believe an ensemble approach will address the shortcomings.
